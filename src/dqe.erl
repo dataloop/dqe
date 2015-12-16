@@ -158,10 +158,12 @@ expand_part({named, N, P}, Buckets) ->
 expand_part({combine, Fun, Parts}, Buckets) ->
     Parts1 = [P || {_, _, P} <- expand_parts(Parts, Buckets)],
     [{keep, keep, {combine, Fun, Parts1}}];
+expand_part({calc, C, {get, {B, M}}}, _Buckets) ->
+    %% We convert the metric from a list to a propper metric here
+    [{keep, keep, {calc, C, {get, {B, dproto:metric_from_list(M)}}}}];
 expand_part({calc, C, {sget, {B, G}}}, Buckets) ->
     Ms = orddict:fetch(B, Buckets),
     {ok, Selected} = glob_match(G, Ms),
-    %% TODO adjust the name here!
     [{M, G, {calc, C, {get, {B, M}}}} || M <- Selected].
 
 
@@ -426,6 +428,9 @@ needs_buckets({combine, _Func, Steps}, Buckets) ->
 
 needs_buckets({calc, _Steps, {sget, {Bucket, Glob}}}, Buckets) ->
     orddict:append(Bucket, glob_prefix(Glob, []), Buckets);
+
+needs_buckets({calc, _Steps, {get, _}}, Buckets) ->
+    Buckets;
 
 needs_buckets({aggr, _Aggr, SubQ}, Buckets) ->
     needs_buckets(SubQ, Buckets);

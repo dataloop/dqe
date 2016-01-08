@@ -99,6 +99,9 @@ flatten({combine, Aggr, Children}, Chain) ->
     Children1 = [flatten(C, []) || C <- Children],
     {calc, Chain, {combine, Aggr, Children1}};
 
+flatten({math, Fun, Child, Val}, Chain) ->
+    flatten(Child, [{math, Fun, Val} | Chain]);
+
 flatten({aggr, Aggr, Child}, Chain) ->
     flatten(Child, [{aggr, Aggr} | Chain]);
 
@@ -319,6 +322,14 @@ unparse({aggr, Fun, Q, A, T}) ->
     As = unparse(A),
     Ts = unparse(T),
     <<Funs/binary, "(", Qs/binary, ", ", As/binary, ", ", Ts/binary, ")">>;
+unparse({math, multiply, Q, V}) ->
+    Qs = unparse(Q),
+    Vs = unparse(V),
+    <<Qs/binary, " * ", Vs/binary>>;
+unparse({math, divide, Q, V}) ->
+    Qs = unparse(Q),
+    Vs = unparse(V),
+    <<Qs/binary, " / ", Vs/binary>>;
 unparse({math, Fun, Q, V}) ->
     Funs = list_to_binary(atom_to_list(Fun)),
     Qs = unparse(Q),

@@ -1,5 +1,6 @@
 -module(dql).
--export([prepare/1, parse/1, unparse/1, glob_match/2, flatten/1, unparse_metric/1]).
+-export([prepare/1, parse/1, unparse/1, glob_match/2, flatten/1, unparse_metric/1,
+         unparse_where/1]).
 
 
 -type bm() :: {binary(), [binary()]}.
@@ -91,6 +92,9 @@ flatten({sget, _} = Get, Chain) ->
 flatten({get, _} = Get, Chain) ->
     {calc, Chain, Get};
 
+flatten({lookup, _} = Lookup, Chain) ->
+    {calc, Chain, Lookup};
+
 flatten({combine, Aggr, Children}, []) ->
     Children1 = [flatten(C, []) || C <- Children],
     {combine, Aggr, Children1};
@@ -98,6 +102,18 @@ flatten({combine, Aggr, Children}, []) ->
 flatten({combine, Aggr, Children}, Chain) ->
     Children1 = [flatten(C, []) || C <- Children],
     {calc, Chain, {combine, Aggr, Children1}};
+
+
+flatten({hfun, Fun, Child, Val}, Chain) ->
+    flatten(Child, [{hfun, Fun, Val} | Chain]);
+
+flatten({hfun, Fun, Child}, Chain) ->
+    flatten(Child, [{hfun, Fun} | Chain]);
+
+flatten({histogram, HighestTrackableValue,
+         SignificantFigures, Child, Time}, Chain) ->
+    flatten(Child, [{histogram, HighestTrackableValue,
+                     SignificantFigures, Time} | Chain]);
 
 flatten({math, Fun, Child, Val}, Chain) ->
     flatten(Child, [{math, Fun, Val} | Chain]);
@@ -125,9 +141,15 @@ lexer_error(Line, E)  ->
 prepare(S) ->
     case parse(S) of
         {ok, {select, Qx, Aliasesx, Tx, Rx}} ->
-            {ok, prepare(Qx, Aliasesx, Tx, Rx)};
+            dqe:pdebug('parse', "Query parsed: ~s", [S]),
+            R = prepare(Qx, Aliasesx, Tx, Rx),
+            dqe:pdebug('parse', "Query Translated.", []),
+            {ok, R};
         {ok, {select, Qx, Tx, Rx}} ->
-            {ok, prepare(Qx, [], Tx, Rx)};
+            dqe:pdebug('parse', "Query parsed: ~s", [S]),
+            R = prepare(Qx, [], Tx, Rx),
+            dqe:pdebug('parse', "Query Translated.", []),
+            {ok, R};
         E ->
             E
     end.
@@ -135,19 +157,24 @@ prepare(S) ->
 prepare(Qs, Aliases, T, R) ->
     Rms = to_ms(R),
     T1 = apply_times(T, Rms),
+    dqe:pdebug('parse', "Times normalized.", []),
     {_AF, AliasesF, MetricsF} =
         lists:foldl(fun({alias, Alias, Resolution}, {QAcc, AAcc, MAcc}) ->
                             {Q1, A1, M1} = preprocess_qry(Resolution, AAcc, MAcc, Rms),
                             {[Q1 | QAcc], gb_trees:enter(Alias, Resolution, A1), M1}
                     end, {[], gb_trees:empty(), gb_trees:empty()}, Aliases),
+    dqe:pdebug('parse', "Aliases resolved.", []),
     {QQ, AliasesQ, MetricsQ} =
         lists:foldl(fun(Q, {QAcc, AAcc, MAcc}) ->
                             {Q1, A1, M1} = preprocess_qry(Q, AAcc, MAcc, Rms),
                             {[Q1 | QAcc] , A1, M1}
                     end, {[], AliasesF, MetricsF}, Qs),
+    dqe:pdebug('parse', "Preprocessor done.", []),
     QQ1 = lists:reverse(QQ),
     QQ2 = [flatten(Q) || Q <- QQ1],
+    dqe:pdebug('parse', "Query flattened.", []),
     {Start, Count} = compute_se(T1, Rms),
+    dqe:pdebug('parse', "Time and resolutions adjusted.", []),
     {QQ2, Start, Count, Rms, AliasesQ, MetricsQ}.
 
 compute_se({between, S, E}, _Rms) when E > S->
@@ -184,6 +211,23 @@ preprocess_qry({aggr, AggF, Q, Arg, T}, Aliases, Metrics, Rms) ->
 preprocess_qry({math, MathF, Q, V}, Aliases, Metrics, Rms) ->
     {Q1, A1, M1} = preprocess_qry(Q, Aliases, Metrics, Rms),
     {{math, MathF, Q1, V}, A1, M1};
+
+preprocess_qry({hfun, HFun, Q}, Aliases, Metrics, Rms) ->
+    {Q1, A1, M1} = preprocess_qry(Q, Aliases, Metrics, Rms),
+    {{hfun, HFun, Q1}, A1, M1};
+
+preprocess_qry({hfun, HFun, Q, V}, Aliases, Metrics, Rms) ->
+    {Q1, A1, M1} = preprocess_qry(Q, Aliases, Metrics, Rms),
+    {{hfun, HFun, Q1, V}, A1, M1};
+
+preprocess_qry({histogram, HighestTrackableValue, SignificantFigures,
+                Q, Time}, Aliases, Metrics, Rms)
+  when is_integer(HighestTrackableValue),
+       SignificantFigures >= 1,
+       SignificantFigures =< 5 ->
+    {Q1, A1, M1} = preprocess_qry(Q, Aliases, Metrics, Rms),
+    {{histogram, HighestTrackableValue, SignificantFigures,
+      Q1, Time}, A1, M1};
 
 
 preprocess_qry({get, BM}, Aliases, Metrics, _Rms) ->
@@ -246,6 +290,21 @@ unparse_metric([Metric | R], Acc) ->
 unparse_metric([], Acc) ->
     Acc.
 
+unparse_tag({tag, <<>>, K}) ->
+    <<"'", K/binary, "'">>;
+unparse_tag({tag, N, K}) ->
+    <<"'", N/binary, "':'", K/binary, "'">>.
+unparse_where({'=', T, V}) ->
+    <<(unparse_tag(T))/binary, " = '", V/binary, "'">>;
+unparse_where({Operator, Clause1, Clause2}) ->
+    P1 = unparse_where(Clause1),
+    P2 = unparse_where(Clause2),
+    Op = case Operator of
+             'and' -> <<" AND ">>;
+             'or' -> <<" OR ">>
+         end,
+    <<P1/binary, Op/binary, "(", P2/binary,")">>.
+
 unparse(L) when is_list(L) ->
     Ps = [unparse(Q) || Q <- L],
     Unparsed = combine(Ps, <<>>),
@@ -269,12 +328,18 @@ unparse({before, A, B}) ->
 unparse({var, V}) ->
     V;
 
+
 unparse({alias, A, V}) ->
     <<(unparse(V))/binary, " AS '", A/binary, "'">>;
 unparse({get, {B, M}}) ->
     <<(unparse_metric(M))/binary, " BUCKET '", B/binary, "'">>;
 unparse({sget, {B, M}}) ->
     <<(unparse_metric(M))/binary, " BUCKET '", B/binary, "'">>;
+unparse({lookup, {in, B, M}}) ->
+    <<(unparse_metric(M))/binary, " IN '", B/binary, "'">>;
+unparse({lookup, {in, B, M, Where}}) ->
+    <<(unparse_metric(M))/binary, " IN '", B/binary,
+      "' WHERE ", (unparse_where(Where))/binary>>;
 unparse({combine, Fun, L}) ->
     Funs = list_to_binary(atom_to_list(Fun)),
     <<Funs/binary, "(", (unparse(L))/binary, ")">>;
@@ -303,6 +368,23 @@ unparse({time, N, d}) ->
     <<(integer_to_binary(N))/binary, " d">>;
 unparse({time, N, w}) ->
     <<(integer_to_binary(N))/binary, " w">>;
+
+unparse({histogram, HighestTrackableValue, SignificantFigures, Q, T}) ->
+    <<"histogram(",
+      (integer_to_binary(HighestTrackableValue))/binary, ", ",
+      (integer_to_binary(SignificantFigures))/binary, ", ",
+      (unparse(Q))/binary, ", ",
+      (unparse(T))/binary, ")">>;
+unparse({hfun, Fun, Q}) ->
+    Funs = list_to_binary(atom_to_list(Fun)),
+    Qs = unparse(Q),
+    <<Funs/binary, "(", Qs/binary, ")">>;
+
+unparse({hfun, percentile, Q, P}) ->
+    Qs = unparse(Q),
+    Ps = unparse(P),
+    <<"percentile(", Qs/binary, ", ", Ps/binary, ")">>;
+
 unparse({aggr, Fun, Q}) ->
     Funs = list_to_binary(atom_to_list(Fun)),
     Qs = unparse(Q),

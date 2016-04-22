@@ -2,12 +2,12 @@
 Nonterminals
 funs fun selector select timeframe aliases alias resolution int_or_time mb fune
 var pit metric glob_metric part_or_name calculatable bucket gmb calculatables
-infix.
+infix hist mfrom where where_part tag.
 
-Terminals '(' ')' ',' '.' '*' '/'
+Terminals '(' ')' ',' '.' '*' '/' '=' ':'
 part caggr aggr integer kw_bucket kw_select kw_last kw_as kw_from kw_in date
-kw_between kw_and kw_ago kw_now derivate time math percentile float name
-kw_after kw_before kw_for.
+kw_between kw_and kw_or kw_ago kw_now derivate time math float name
+kw_after kw_before kw_for histogram percentile avg hfun mm kw_where.
 
 
 %%%===================================================================
@@ -47,13 +47,27 @@ calculatable -> infix : '$1'.
 calculatables -> calculatable : ['$1'].
 calculatables -> calculatable ',' calculatables : ['$1'] ++ '$3'.
 
+%%      1         2   3       4   5       6   7       8   9           10
+hist -> histogram '(' integer ',' integer ',' calculatable ',' int_or_time ')'
+            : {histogram, unwrap('$3'), unwrap('$5'), '$7', '$9'}.
+
+%% Histogram related functions
+
+
+%% Histogram based aggregation functiosn
+fun -> mm         '(' hist          ')' : {hfun, unwrap('$1'), '$3'}.
+fun -> hfun       '(' hist          ')' : {hfun, unwrap('$1'), '$3'}.
+fun -> avg        '(' hist          ')' : {hfun, avg, '$3'}.
+fun -> percentile '(' hist          ',' float ')' : {hfun, percentile, '$3', unwrap('$5')}.
 %% A aggregation function
-fun -> derivate '(' calculatable ')' : {aggr, derivate, '$3'}.
-fun -> percentile '(' calculatable ',' float ',' int_or_time ')' : {aggr, percentile, '$3', unwrap('$5'), '$7'}.
-fun -> aggr '(' calculatable ',' int_or_time ')' : {aggr, unwrap('$1'), '$3', '$5'}.
-fun -> caggr '(' calculatables ')' : {combine, unwrap('$1'), '$3'}.
-fun -> caggr '(' calculatable ',' int_or_time ')' : {aggr, unwrap('$1'), '$3', '$5'}.
-fun -> math '(' calculatable ',' integer ')' : {math, unwrap('$1'), '$3', unwrap('$5')}.
+fun -> derivate   '(' calculatable  ')' : {aggr, derivate, '$3'}.
+fun -> mm         '(' calculatable  ',' int_or_time ')' : {aggr, unwrap('$1'), '$3', '$5'}.
+fun -> aggr       '(' calculatable  ',' int_or_time ')' : {aggr, unwrap('$1'), '$3', '$5'}.
+fun -> avg        '(' calculatables ')' : {combine, unwrap('$1'), '$3'}.
+fun -> avg        '(' calculatable  ',' int_or_time ')' : {aggr, unwrap('$1'), '$3', '$5'}.
+fun -> caggr      '(' calculatables ')' : {combine, unwrap('$1'), '$3'}.
+fun -> caggr      '(' calculatable  ',' int_or_time ')' : {aggr, unwrap('$1'), '$3', '$5'}.
+fun -> math       '(' calculatable  ',' integer ')' : {math, unwrap('$1'), '$3', unwrap('$5')}.
 
 infix -> calculatable '/' integer : {math, divide, '$1', unwrap('$3')}.
 infix -> calculatable '*' integer : {math, multiply, '$1', unwrap('$3')}.
@@ -65,11 +79,26 @@ var -> part_or_name : {var, '$1'}.
 %% A selector, either a combination of <metric> BUCKET <bucket> or a mget aggregate.
 selector -> mb : {get, '$1'}.
 selector -> gmb : {sget, '$1'}.
+selector -> mfrom : {lookup, '$1'}.
 
 %% A bucket and metric combination used as a solution
 mb -> metric kw_bucket part_or_name : {'$3', '$1'}.
 
 gmb -> glob_metric kw_bucket bucket : {'$3', '$1'}.
+
+mfrom -> metric kw_in bucket : {in, '$3', '$1'}.
+mfrom -> metric kw_in bucket kw_where where : {in, '$3', '$1', '$5'}.
+
+
+tag -> part_or_name                  : {tag, <<>>, '$1'}.
+tag -> part_or_name ':' part_or_name : {tag, '$1', '$3'}.
+
+where_part -> tag '=' part_or_name : {'=', '$1', '$3'}.
+where_part -> '(' where ')'        : '$2'.
+
+where -> where_part              : '$1'.
+where -> where kw_and where_part : {'and', '$1', '$3'}.
+where -> where kw_or where_part  : {'or', '$1', '$3'}.
 
 %%%===================================================================
 %%% From section, aliased selectors

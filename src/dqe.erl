@@ -12,7 +12,10 @@
 
 -include_lib("dproto/include/dproto.hrl").
 
--export([prepare/1, run/1, run/2, error_string/1]).
+-export([prepare/1, run/1, run/2, error_string/1,
+         %% Exports for meck
+         glob_match/2, pdebug/3]).
+
 
 -type query_reply() :: [{Name :: binary(),
                          Data :: binary(),
@@ -80,27 +83,43 @@ run(Query) ->
                  {ok, Start::pos_integer(), query_reply()}.
 
 run(Query, Timeout) ->
+    put(start, erlang:system_time()),
     case prepare(Query) of
-        {ok, {Parts, Start, Count}} ->
+        {ok, {Total, Unique, Parts, Start, Count}} ->
+            pdebug('query', "preperation done.", []),
             WaitRef = make_ref(),
             Funnel = {dqe_funnel, [[{dqe_collect, [Part]} || Part <- Parts]]},
             Sender = {dflow_send, [self(), WaitRef, Funnel]},
-            {ok, _Ref, Flow} = dflow:build(Sender, [optimize, terminate_when_done]),
+            %% We only optimize the flow when there are at least 10% duplicate
+            %% gets, or in other words if less then 90% of the requests are
+            %% unique
+            FlowOpts = case Unique / Total of
+                           UniquePercentage when UniquePercentage > 0.9 ->
+                               [terminate_when_done];
+                           _ ->
+                               [optimize, terminate_when_done]
+                       end,
+            {ok, _Ref, Flow} = dflow:build(Sender, FlowOpts),
+            pdebug('query', "flow generated.", []),
             dflow:start(Flow, {Start, Count}),
             case  dflow_send:recv(WaitRef, Timeout) of
                 {ok, [{error, no_results}]} ->
+                    pdebug('query', "Query has no results.", []),
                     {error, no_results};
                 {ok, [Result]} ->
-                    {ok, Start, Result};
+                    pdebug('query', "Query complete.", []),
+                    Result1 = [Element || {points, Element} <- Result],
+                    {ok, Start, Result1};
                 {ok, []} ->
+                    pdebug('query', "Query has no results.", []),
                     {error, no_results};
                 E ->
+                    pdebug('query', "Query error: ~p", [E]),
                     E
             end;
         E ->
             E
     end.
-
 %%--------------------------------------------------------------------
 %% @doc Prepares query exeuction, this can be used of the query is
 %% desired to be executed asyncrounously instead of using {@link run/2}
@@ -121,31 +140,45 @@ run(Query, Timeout) ->
 prepare(Query) ->
     case dql:prepare(Query) of
         {ok, {Parts, Start, Count, _Res, Aliases, _SomethingElse}} ->
+            pdebug('prepare', "Parsing done.", []),
             Buckets = needs_buckets(Parts, []),
-            Buckets1 = [{B, compress_prefixes(Ps)} || {B, Ps} <- Buckets],
-            Buckets2 =
-                [case Ps of
-                     all ->
-                         {Bkt, dalmatiner_connection:list(Bkt)};
-                     _ ->
-                         Ps1 = [begin
-                                    {ok, Ms} = dalmatiner_connection:list(Bkt, P),
-                                    Ms
-                                end || P <- Ps],
-                         Ps2 = lists:usort(lists:flatten(Ps1)),
-                         {Bkt, Ps2}
-                 end
-                 || {Bkt, Ps} <- Buckets1],
-            Parts1 = expand_parts(Parts, Buckets2),
-            case name_parts(Parts1, [], Aliases, Buckets2) of
+            pdebug('prepare', "Buckets analyzed (~p).", [length(Buckets)]),
+            Buckets1 = [begin
+                            {ok, BMs} = dqe_idx:expand(B, Gs),
+                            BMs
+                        end || {B, Gs} <- Buckets],
+            pdebug('prepare', "Buckets fetched.", []),
+            Parts1 = expand_parts(Parts, Buckets1),
+            pdebug('prepare', "Parts expanded.", []),
+            {Total, Unique} = count_parts(Parts1),
+            pdebug('prepare', "Counting parts ~p total and ~p unique.",
+                   [Total, Unique]),
+            case name_parts(Parts1, [], Aliases, Buckets1) of
                 {ok, Parts2} ->
-                    {ok, {Parts2, Start, Count}};
+                    pdebug('prepare', "Naing applied.", []),
+
+                    {ok, {Total, Unique, Parts2, Start, Count}};
                 E ->
+                    pdebug('prepare', "Naing failed.", []),
                     E
             end;
         E ->
             E
     end.
+
+count_parts(Parts) ->
+    Gets = [extract_gets(Part) || Part <- Parts],
+    Gets1 = lists:flatten(Gets),
+    Total = length(Gets1),
+    Unique = length(lists:usort(Gets1)),
+    {Total, Unique}.
+
+extract_gets({named, _, P}) ->
+    extract_gets(P);
+extract_gets({combine, _Fun, Parts}) ->
+    [extract_gets(P) || P <- Parts];
+extract_gets({calc, _, {get, {B, M}}}) ->
+    {get, {B, M}}.
 
 expand_parts(Parts, Buckets) ->
     Parts1 = [expand_part(P, Buckets) || P <- Parts],
@@ -165,12 +198,18 @@ expand_part({calc, C, {combine, _, _}= Comb} , Buckets) ->
     %% We convert the metric from a list to a propper metric here
     [{keep, keep, Comb1}] = expand_part(Comb, Buckets),
     [{keep, keep, {calc, C, Comb1}}];
+
 expand_part({calc, C, {sget, {B, G}}}, Buckets) ->
     Ms = orddict:fetch(B, Buckets),
-    {ok, Selected} = glob_match(G, Ms),
-    [{M, G, {calc, C, {get, {B, M}}}} || M <- Selected].
+    {ok, Selected} = dqe:glob_match(G, Ms),
+    [{M, G, {calc, C, {get, {B, M}}}} || M <- Selected];
 
-
+expand_part({calc, C, {lookup, Query}}, _Buckets) ->
+    {ok, Selected} = dqe_idx:lookup(Query),
+    pdebug('prepare', "Looked up ~p metrics for ~p.",
+           [length(Selected), Query]),
+    %% TODO fix naming
+    [{keep, keep, {calc, C, {get, {B, M}}}} || {B, M} <- Selected].
 
 update_name(Name, keep, keep) ->
     Name;
@@ -193,22 +232,6 @@ name_parts([], Acc, _Aliases, _Buckets) ->
     {ok, lists:reverse(Acc)}.
 
 
-compress_prefixes(Prefixes) ->
-    compress_prefixes(lists:sort(Prefixes), []).
-
-compress_prefixes([[] | _], _) ->
-    all;
-compress_prefixes([], R) ->
-    R;
-compress_prefixes([E], R) ->
-    [E | R];
-compress_prefixes([A, B | R], Acc) ->
-    case binary:longest_common_prefix([A, B]) of
-        L when L == byte_size(A) ->
-            compress_prefixes([B | R], Acc);
-        _ ->
-            compress_prefixes([B | R], [A | Acc])
-    end.
 
 %%%===================================================================
 %%% Internal functions
@@ -231,11 +254,13 @@ translate({calc, [], {get, {Bucket, Metric}}}, _Aliases, _Buckets) ->
 
 %% TODO we can do this better!
 translate({calc, Aggrs, G}, Aliases, Buckets) ->
-    FoldFn = fun({Type, Fun}, Acc) ->
+    FoldFn = fun({histogram, HTV, SF, T}, Acc) ->
+                     {histogram, HTV, SF, Acc, T};
+                ({Type, Fun}, Acc) ->
                      {Type, Fun, Acc};
-                 ({Type, Fun, Arg1}, Acc) ->
+                ({Type, Fun, Arg1}, Acc) ->
                      {Type, Fun, Acc, Arg1};
-                 ({Type, Fun, Arg1, Arg2}, Acc) ->
+                ({Type, Fun, Arg1, Arg2}, Acc) ->
                      {Type, Fun, Acc, Arg1, Arg2}
              end,
     Recursive = lists:foldl(FoldFn, G, Aggrs),
@@ -266,6 +291,41 @@ translate({aggr, derivate, SubQ}, Aliases, Buckets) ->
     end;
 
 
+%%--------------------------------------------------------------------
+%% Historam
+%%--------------------------------------------------------------------
+
+translate({hfun, Fun, SubQ}, Aliases, Buckets) ->
+    case translate(SubQ, Aliases, Buckets) of
+        {ok, SubQ1} ->
+            {ok, {dqe_hfun1, [Fun, SubQ1]}};
+        E ->
+            E
+    end;
+
+translate({hfun, Fun, SubQ, Val}, Aliases, Buckets) ->
+    case translate(SubQ, Aliases, Buckets) of
+        {ok, SubQ1} ->
+            {ok, {dqe_hfun2, [Fun, Val, SubQ1]}};
+        E ->
+            E
+    end;
+
+translate({histogram, HighestTrackableValue,
+           SignificantFigures, SubQ, Time}, Aliases, Buckets)
+  when SignificantFigures >= 1, SignificantFigures =< 5->
+    case translate(SubQ, Aliases, Buckets) of
+        {ok, SubQ1} ->
+            {ok,
+             {dqe_hist, [HighestTrackableValue, SignificantFigures, SubQ1, Time]}};
+        E ->
+            E
+    end;
+
+translate({histogram, _HighestTrackableValue,
+           _SignificantFigures, _SubQ, _Time}= E, _Aliases, _Buckets) ->
+    io:format(user, "sig: ~p~n", [E]),
+    {error, significant_figures};
 
 %%--------------------------------------------------------------------
 %% Math
@@ -406,13 +466,6 @@ glob_match(G, Ms) ->
             {ok, Res}
     end.
 
-glob_prefix([], Prefix) ->
-    dproto:metric_from_list(lists:reverse(Prefix));
-glob_prefix(['*' |_], Prefix) ->
-    dproto:metric_from_list(lists:reverse(Prefix));
-glob_prefix([E | R], Prefix) ->
-    glob_prefix(R, [E | Prefix]).
-
 
 
 rmatch(['*' | Rm], <<_S:?METRIC_ELEMENT_SS/?SIZE_TYPE, _:_S/binary, Rb/binary>>) ->
@@ -435,9 +488,12 @@ needs_buckets({calc, _Steps, {combine, _Func, _CSteps} = Comb}, Buckets) ->
     needs_buckets(Comb, Buckets);
 
 needs_buckets({calc, _Steps, {sget, {Bucket, Glob}}}, Buckets) ->
-    orddict:append(Bucket, glob_prefix(Glob, []), Buckets);
+    orddict:append(Bucket, Glob, Buckets);
 
 needs_buckets({calc, _Steps, {get, _}}, Buckets) ->
+    Buckets;
+
+needs_buckets({calc, _Steps, {lookup, _}}, Buckets) ->
     Buckets;
 
 needs_buckets({aggr, _Aggr, SubQ}, Buckets) ->
@@ -459,4 +515,23 @@ needs_buckets({var, _}, Buckets) ->
     Buckets;
 
 needs_buckets({get, _}, Buckets) ->
+    Buckets;
+
+needs_buckets({lookup, _}, Buckets) ->
     Buckets.
+
+pdebug(S, M, E) ->
+    D =  erlang:system_time() - pstart(),
+    MS = round(D / 1000 / 1000),
+    lager:debug("[dqe:~s|~p|~pms] " ++ M, [S, self(), MS | E]).
+
+
+pstart() ->
+    case get(start) of
+        N when is_integer(N) ->
+            N;
+        _ ->
+            N = erlang:system_time(),
+            put(start, N),
+            N
+    end.

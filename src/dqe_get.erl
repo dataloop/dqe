@@ -27,25 +27,25 @@ start({Start, Count},
       State = #state{bucket = Bucket, metric = Metric, chunk = Chunk}) when
       Count >= Chunk ->
     %% We do a bit of cheating here this allows us to loop.
-    case dalmatiner_connection:get(Bucket, Metric, Start, Chunk) of
+    case ddb_connection:get(Bucket, Metric, Start, Chunk) of
         {error, _Error} ->
             {done, State};
         {ok, Res, <<>>} ->
             dflow:start(self(), {Start + Chunk, Count - Chunk}),
-            {emit, {mmath_bin:empty(Chunk), Res}, State};
+            {emit, {realized, {mmath_bin:empty(Chunk), Res}}, State};
         {ok, Res, Data} ->
             dflow:start(self(), {Start + Chunk, Count - Chunk}),
-            {emit, {mmath_bin:realize(Data), Res}, State}
+            {emit, {realized, {mmath_bin:realize(Data), Res}}, State}
     end;
 
 start({Start, Count}, State = #state{bucket = Bucket, metric = Metric}) ->
-    case dalmatiner_connection:get(Bucket, Metric, Start, Count) of
+    case ddb_connection:get(Bucket, Metric, Start, Count) of
         {error, _Error} ->
             {done, State};
         {ok, Res, <<>>} ->
-            {done, {mmath_bin:empty(Count), Res}, State};
+            {done, {realized, {mmath_bin:empty(Count), Res}}, State};
         {ok, Res, Data} ->
-            {done, {mmath_bin:realize(Data), Res}, State}
+            {done, {realized, {mmath_bin:realize(Data), Res}}, State}
     end.
 
 emit(_Child, _Data, State) ->

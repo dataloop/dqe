@@ -14,9 +14,14 @@ DATE    = "([^"]|\.)+"
 MET     = {PART}(\.{PART})+
 S       = [A-Za-z][A-Za-z0-9_@-]*
 WS      = ([\000-\s]|%.*)
-AGGR    = (min|max|empty)
-CAGGR   = (avg|sum)
+MM      = (min|max)
+AVG     = (avg)
+HFUN    = (mean|median|stddev)
+AGGR    = (empty)
+CAGGR   = (sum)
 MATH    = (divide|multiply)
+HIST    = (histogram)
+PERC    = (percentile)
 TIME    = (ms|s|m|h|d|w)
 SELECT  = [Ss][Ee][Ll][Ee][Cc][Tt]
 BUCKET  = [Bb][Uu][Cc][Kk][Ee][Tt]
@@ -29,9 +34,11 @@ IN      = [Ii][Nn]
 NOW     = [Nn][Oo][Ww]
 AGO     = [Aa][Gg][Oo]
 AND     = [Aa][Nn][Dd]
+OR      = [Oo][Rr]
 AFTER   = [Aa][Ff][Tt][Ee][Rr]
 BEFORE  = [Bb][Ee][Ff][Oo][Rr][Ee]
 FOR     = [Ff][Oo][Rr]
+WHERE   = [Ww][Hh][Ee][Rr][Ee]
 
 
 
@@ -47,17 +54,22 @@ Rules.
 {NOW}       :   {token, {kw_now,        TokenLine}}.
 {AGO}       :   {token, {kw_ago,        TokenLine}}.
 {AND}       :   {token, {kw_and,        TokenLine}}.
+{OR}        :   {token, {kw_or,         TokenLine}}.
 {AFTER}     :   {token, {kw_after,      TokenLine}}.
 {BEFORE}    :   {token, {kw_before,     TokenLine}}.
 {FOR}       :   {token, {kw_for,        TokenLine}}.
+{WHERE}     :   {token, {kw_where,      TokenLine}}.
 
 derivate    :   {token, {derivate,      TokenLine, a(TokenChars)}}.
-percentile  :   {token, {percentile,    TokenLine, a(TokenChars)}}.
 {AGGR}      :   {token, {aggr,          TokenLine, a(TokenChars)}}.
+{MM}        :   {token, {mm,            TokenLine, a(TokenChars)}}.
+{AVG}       :   {token, {avg,           TokenLine, a(TokenChars)}}.
+{HFUN}      :   {token, {hfun,          TokenLine, a(TokenChars)}}.
 {MATH}      :   {token, {math,          TokenLine, a(TokenChars)}}.
 {CAGGR}     :   {token, {caggr,         TokenLine, a(TokenChars)}}.
 {TIME}      :   {token, {time,          TokenLine, a(TokenChars)}}.
-
+{HIST}      :   {token, {histogram,     TokenLine, a(TokenChars)}}.
+{PERC}      :   {token, {percentile,    TokenLine, a(TokenChars)}}.
 
 {Sign}{Digit}+ : {token, {integer,       TokenLine, i(TokenChars)}}.
 {Sign}{Float}  : {token, {float,         TokenLine, f(TokenChars)}}.
@@ -67,7 +79,7 @@ percentile  :   {token, {percentile,    TokenLine, a(TokenChars)}}.
 {DATE}      :   S = strip(TokenChars,   TokenLen),
                 {token, {date,          TokenLine, S}}.
 {S}         :   {token, {name,          TokenLine, b(TokenChars)}}.
-[(),.*/]    :   {token, {a(TokenChars), TokenLine}}.
+[(),.*/=:]  :   {token, {a(TokenChars), TokenLine}}.
 {WS}+       :   skip_token.
 
 Erlang code.

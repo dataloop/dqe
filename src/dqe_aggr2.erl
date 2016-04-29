@@ -32,7 +32,9 @@ emit(Child, {realized, {Data, Resolution}},
 
 emit(_Child, {realized, {Data, _R}},
      State = #state{aggr = Aggr, time = Time, acc = Acc}) ->
-    case execute(Aggr, <<Data/binary, Acc/binary>>, Time, <<>>) of
+    Bin = <<Data/binary, Acc/binary>>,
+    S = mmath_bin:complete_size_r(Acc, T1),
+    case execute(Aggr, S, Bin, Time, <<>>) of
         {Acc1, <<>>} ->
             {ok, State#state{acc = Acc1}};
         {Acc2, AccEmit} ->
@@ -49,11 +51,9 @@ done(_Child, State = #state{aggr = Aggr, time = Time, acc = Acc}) ->
     {done, {realized, {Data, State#state.resolution}}, State#state{acc = <<>>}}.
 
 
-execute(Aggr, Acc, T1, AccEmit) when byte_size(Acc) >= T1 * ?RDATA_SIZE ->
-    MinSize = T1 * ?RDATA_SIZE,
-    <<Data:MinSize/binary, Acc1/binary>> = Acc,
+execute(Aggr, S, <<Data:S/binary, Acc1/binary>>, T1, AccEmit) ->
     Result = mmath_aggr:Aggr(Data, T1),
     execute(Aggr, Acc1, T1, <<AccEmit/binary, Result/binary>>);
 
-execute(_, Acc, _, AccEmit) ->
+execute(_, 0, Acc, _, AccEmit) ->
     {Acc, AccEmit}.

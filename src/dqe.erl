@@ -212,6 +212,7 @@ prepare(Query) ->
             dqe_lib:pdebug('prepare', "Counting parts ~p total and ~p unique.",
                            [Total, Unique]),
             {ok, Parts1} = add_collect(Parts, []),
+            dqe_lib:pdebug('query', "flow parts: ~p", [Parts1]),
             dqe_lib:pdebug('prepare', "Naming applied.", []),
             {ok, {Total, Unique, Parts1}, Start, Limit};
         E ->
@@ -233,7 +234,9 @@ prepare(Query) ->
 -spec add_collect([dql:query_stmt()], [dflow:step()]) -> {ok, [dflow:step()]}.
 add_collect([{named, Name, Q} | R], Acc) ->
     {ok, Resolution, Translated} = translate(Q),
-    Q1 = {dqe_collect, [Name, Resolution, Translated]},
+    DebugArgs = ['query', ["dqe_collect ", Name],
+                 {dqe_collect, [Name, Resolution, Translated]}],
+    Q1 = {dqe_debug, DebugArgs},
     add_collect(R, [Q1 | Acc]);
 
 add_collect([], Acc) ->
@@ -330,7 +333,10 @@ translate({calc, Aggrs, G}) ->
     {ok, R, lists:foldl(FoldFn, G1, Aggrs)};
 
 translate(#{op := get, resolution := R, args := Args}) ->
-    {ok, R, {dqe_get, Args}};
+    [_Start, _Count, _Resolution, Bucket, Key] = Args,
+    Name = ["dqe_get", " ", Bucket, "/", Key],
+    DebugArgs = ['query', Name, {dqe_get, Args}],
+    {ok, R, {dqe_debug, DebugArgs}};
 
 translate({combine,
              #{resolution := R, args := #{mod := Mod, state := State}},

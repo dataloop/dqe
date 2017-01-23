@@ -8,7 +8,9 @@
 %%%-------------------------------------------------------------------
 -module(dql_resolution).
 
--export([resolve/2, propagate/1, start_time/1]).
+% -export([resolve/2, propagate/1, start_time/1]).
+
+-compile([export_all]).
 
 resolve(Qs, T) ->
     case lists:foldl(fun get_resolution_fn/2, {[], T, #{}}, Qs) of
@@ -36,14 +38,19 @@ start_time(T) ->
                         {[dql:named()], dql:time(), #{}} |
                         {error, resolution_conflict}) ->
                                {[dql:named()], dql:time(), #{}} |
-                               {error,resolution_conflict}.
+                               {error, no_results} |
+                               {error, resolution_conflict}.
 get_resolution_fn(Q, {QAcc, T, #{} = RAcc}) when is_list(QAcc) ->
     case get_times(Q, T, RAcc) of
         {ok, Q1, RAcc1} ->
             {[Q1 | QAcc], T, RAcc1};
+        {error, no_results} ->
+            {error, no_results};
         {error, resolution_conflict} ->
             {error, resolution_conflict}
     end;
+get_resolution_fn(_, {error, no_results}) ->
+    {error, no_results};
 get_resolution_fn(_, {error, resolution_conflict}) ->
     {error, resolution_conflict}.
 
@@ -64,11 +71,16 @@ get_times(O = #{op := named, args := [N, C]}, T, #{} = BucketResolutions) ->
     end.
 -spec get_times_(dql:flat_stmt(), dql:time(), #{}) ->
                         {ok, dql:flat_stmt(), #{}} |
+                        {error, no_results} |
                         {error, resolution_conflict}.
 get_times_(S = #{op := timeshift, args := [Shift, C]}, T, BucketResolutions) ->
     T1 = S#{args := [Shift, T]},
     get_times_(C, T1, BucketResolutions);
 
+get_times_({calc, _Chain, {combine, F = #{}, [] = _Elements}}, _T,
+            #{} = _BucketResolutions) ->
+    dqe_lib:pdebug(prepare, "No input for combiner Fn: ~p", [F]),
+    {error, no_results};
 get_times_({calc, Chain,
             {combine,
              F = #{args := A = #{mod := FMod, constants := Cs}}, Elements}
@@ -100,7 +112,6 @@ get_times_({calc, Chain,
                     Calc1 = {calc, Chain, Comb1},
                     {ok, apply_times(Calc1), BR};
                 _Error ->
-                    io:format("Elements: ~p~n", [Elements]),
                     {error, resolution_conflict}
             end;
         {error, E} ->

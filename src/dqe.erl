@@ -163,22 +163,25 @@ run(Query, Timeout) ->
             FlowOpts = case Unique / Total of
                            UniquePercentage when UniquePercentage > 0.9;
                                                  Total > 1000 ->
-                               [terminate_when_done];
+                               [];
                            _ ->
-                               [optimize, terminate_when_done]
+                               [optimize]
                        end,
             {ok, _Ref, Flow} = dflow:build(Sender, FlowOpts),
             dqe_lib:pdebug('query', "flow generated.", []),
             dflow:start(Flow, run),
             case dflow_send:recv(WaitRef, Timeout) of
                 {ok, [{error, no_results}]} ->
+                    terminate_with_graph(Flow),
                     dqe_lib:pdebug('query', "Query has no results.", []),
                     {error, no_results};
                 {ok, [Result]} ->
+                    terminate_with_graph(Flow),
                     dqe_lib:pdebug('query', "Query complete.", []),
                     %% Result1 = [Element || {points, Element} <- Result],
                     {ok, Start, Result};
                 {ok, []} ->
+                    terminate_with_graph(Flow),
                     dqe_lib:pdebug('query', "Query has no results.", []),
                     {error, no_results};
                 E ->
@@ -234,9 +237,7 @@ prepare(Query) ->
 -spec add_collect([dql:query_stmt()], [dflow:step()]) -> {ok, [dflow:step()]}.
 add_collect([{named, Name, Q} | R], Acc) ->
     {ok, Resolution, Translated} = translate(Q),
-    DebugArgs = ['query', ["dqe_collect ", Name],
-                 {dqe_collect, [Name, Resolution, Translated]}],
-    Q1 = {dqe_debug, DebugArgs},
+    Q1 = {dqe_collect, [Name, Resolution, Translated]},
     add_collect(R, [Q1 | Acc]);
 
 add_collect([], Acc) ->
@@ -333,10 +334,7 @@ translate({calc, Aggrs, G}) ->
     {ok, R, lists:foldl(FoldFn, G1, Aggrs)};
 
 translate(#{op := get, resolution := R, args := Args}) ->
-    [_Start, _Count, _Resolution, Bucket, Key] = Args,
-    Name = ["dqe_get", " ", Bucket, "/", Key],
-    DebugArgs = ['query', Name, {dqe_get, Args}],
-    {ok, R, {dqe_debug, DebugArgs}};
+    {ok, R, {dqe_get, Args}};
 
 translate({combine,
              #{resolution := R, args := #{mod := Mod, state := State}},
@@ -346,3 +344,11 @@ translate({combine,
                   P1
               end || Part <- Parts],
     {ok, R, {dqe_fun_list_flow, [Mod, State | Parts1]}}.
+
+terminate_with_graph(Flow) when is_pid(Flow) ->
+    N = node(),
+    {Mega, Secs, Micro} = erlang:timestamp(),
+    Name = lists:flatten(io_lib:format("/tmp/~p-~p_~p_~p.dot",
+                                       [N, Mega, Secs, Micro])),
+    dflow_graph:write_dot(Name, Flow).
+

@@ -122,19 +122,21 @@ get_times_({calc, Chain,
     end;
 
 get_times_(#{op := timeshift,
-             args := [NewShift, C]}, Shift, BucketResolutions) ->
+             args := [NewShift, C]}, _Shift, BucketResolutions) ->
     {ok, C1, BucketResolutions1} =
-        get_times_(C, Shift + NewShift, BucketResolutions),
+        get_times_(C, NewShift, BucketResolutions),
     {ok, C1, BucketResolutions1};
 
 get_times_({calc, Chain, E = #{op := events}}, Shift, BucketResolutions) ->
-    C1 = {calc, Chain, E#{shift => Shift}},
+    NewShift = apply_times(Shift, 1),
+    C1 = {calc, Chain, E#{shift => NewShift}},
     {ok, C1, BucketResolutions};
 get_times_({calc, Chain, Get}, Shift, BucketResolutions) ->
     {ok, Get1 = #{ranges := Ranges,
                   resolution := Rms}, BucketResolutions1} =
         bucket_resolution(Get, BucketResolutions),
-    Ranges1 = [{(Start - Shift) div Rms, (End - Shift) div Rms, Endpoint}
+    NewShift = apply_times(Shift, Rms),
+    Ranges1 = [{(Start - NewShift) div Rms, (End - NewShift) div Rms, Endpoint}
                || {Start, End, Endpoint} <- Ranges],
     Calc1 = {calc, Chain, Get1#{resolution => Rms,
                                 ranges => Ranges1}},
@@ -280,7 +282,6 @@ apply_times(#{op := timeshift, args := [Shift, T]}, R) ->
     T1 = apply_times(T, R),
     S1 = apply_times(Shift, R),
     #{op => timeshift, args => [S1, T1]};
-
 
 apply_times(N, _) when is_integer(N) ->
     erlang:max(1, N);
